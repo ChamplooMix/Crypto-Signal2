@@ -1,11 +1,6 @@
 """crypto_dashboard.py
-Streamlit-App – komplett ohne externe Abhängigkeiten jenseits von Pandas & yfinance.
-Berechnet EMAs mit der Pandas-eigenen .ewm-Methode → kein pandas_ta mehr nötig.
-
-Lokale Nutzung
---------------
-    pip install -r requirements.txt
-    streamlit run crypto_dashboard.py
+Streamlit‑App ohne serverseitiges Backend.
+Zieht Daten via yfinance und filtert fehlende Serien, um KeyErrors zu vermeiden.
 """
 
 import streamlit as st
@@ -15,84 +10,70 @@ import pandas as pd
 import plotly.express as px
 
 # -------------------------------------------------------------------------
-# Branding – Corporate Colours
-BRAND_MAIN = "#207373"   # Skobeloff
-BRAND_LIGHT = "#99cccc"  # Powder Green
-ACCENT_1    = "#ff9900"  # Tangerine
-ACCENT_2    = "#990066"  # Flirt
-BG_LIGHT    = "#cae3e3"  # Powder Green Light
-
-st.set_page_config(page_title="Crypto Signal Dashboard",
-                   page_icon="📊", layout="wide")
-
-st.markdown(
-    f"""
-    <style>
-        .stApp {{
-            background-color:{BG_LIGHT};
-            font-family:'Inter',sans-serif;
-        }}
-        h1,h2,h3,h4 {{ color:{BRAND_MAIN}; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# Farben & Layout
+BRAND_MAIN = "#207373"; BRAND_LIGHT = "#99cccc"; ACCENT_1 = "#ff9900"; ACCENT_2 = "#990066"; BG_LIGHT = "#cae3e3"
+st.set_page_config(page_title="Crypto Signal Dashboard", page_icon="📊", layout="wide")
+st.markdown(f"""<style>.stApp {{background:{BG_LIGHT};font-family:'Inter',sans-serif}} h1,h2,h3,h4{{color:{BRAND_MAIN}}}</style>""",unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------
-# Helper – Time-frame Mapping (Streamlit-Auswahl → yfinance period/interval)
 TIMEFRAME_MAP = {
-    "5m":  ("7d",  "5m"),
+    "5m": ("7d", "5m"),
     "15m": ("30d", "15m"),
-    "1h":  ("60d", "60m"),
-    "4h":  ("60d", "240m"),
-    "1d":  ("365d", "1d"),
+    "1h": ("60d", "60m"),
+    "4h": ("60d", "240m"),
+    "1d": ("365d", "1d"),
 }
 
-# -------------------------------------------------------------------------
-# Sidebar – User-Inputs
 st.sidebar.title("⚙️ Einstellungen")
 tf = st.sidebar.selectbox("Timeframe", list(TIMEFRAME_MAP), index=3)
-alt_ticker = st.sidebar.text_input("Altcoin-Ticker (Yahoo-Symbol)", value="ETH-USD")
-
-# Auto-Refresh alle 5 Minuten
+alt_ticker = st.sidebar.text_input("Altcoin-Ticker (Yahoo)", value="ETH-USD")
 st_autorefresh(interval=300_000, key="refresh")
 period, interval = TIMEFRAME_MAP[tf]
 
-@st.cache_data(ttl=280, show_spinner=False)
-def load_data(alt: str, per: str, inter: str) -> pd.DataFrame:
-    """Lädt BTC, S&P 500, Gold & Altcoin als Adjusted Close-Preise."""
-    btc  = yf.download("BTC-USD", period=per, interval=inter, progress=False)["Adj Close"].rename("BTC")
-    spx  = yf.download("^GSPC",   period=per, interval=inter, progress=False)["Adj Close"].rename("SPX")
-    gold = yf.download("GC=F",    period=per, interval=inter, progress=False)["Adj Close"].rename("GOLD")
-    altc = yf.download(alt,       period=per, interval=inter, progress=False)["Adj Close"].rename("ALT")
-    return pd.concat([btc, spx, gold, altc], axis=1).dropna()
+# -------------------------------------------------------------------------
 
-data = load_data(alt_ticker, period, interval)
+def get_price(ticker: str, col_name: str) -> pd.Series:
+    """Download price series and gracefully fall back to 'Close'."""
+    df = yf.download(ticker, period=period, interval=interval, progress=False)
+    if df.empty:
+        return pd.Series(dtype=float, name=col_name)
+    price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    return df[price_col].rename(col_name)
+
+@st.cache_data(ttl=280, show_spinner=False)
+def load_data(alt: str) -> pd.DataFrame:
+    btc  = get_price("BTC-USD", "BTC")
+    spx  = get_price("^GSPC", "SPX")
+    gold = get_price("GC=F", "GOLD")
+    altc = get_price(alt, "ALT")
+    df = pd.concat([btc, spx, gold, altc], axis=1)
+    # Drop rows where all assets are NaN
+    return df.dropna(how="all")
+
+data = load_data(alt_ticker)
+
+if data.empty or {"BTC", "ALT"}.issubset(data.columns) is False:
+    st.error("Daten konnten nicht geladen werden – Prüfe Ticker/Intervall.")
+    st.stop()
 
 # -------------------------------------------------------------------------
-# Rolling 30-Bar-Korrelationen
 window = 30
 corr_df = pd.DataFrame({
     "date": data.index,
-    "BTC-SPX":  data["BTC"].rolling(window).corr(data["SPX"]),
-    "BTC-Gold": data["BTC"].rolling(window).corr(data["GOLD"]),
+    "BTC-SPX":  data["BTC"].rolling(window).corr(data.get("SPX")),
+    "BTC-Gold": data["BTC"].rolling(window).corr(data.get("GOLD")),
     "Alt-BTC":  data["ALT"].rolling(window).corr(data["BTC"]),
 }).dropna()
 
-# -------------------------------------------------------------------------
-# Einfaches Trading-Signal: EMA(8) > EMA(21) und ρ(Alt-BTC)<0,5
-ema_fast = data["ALT"].ewm(span=8,  adjust=False).mean()
+ema_fast = data["ALT"].ewm(span=8, adjust=False).mean()
 ema_slow = data["ALT"].ewm(span=21, adjust=False).mean()
 trend_ok = ema_fast > ema_slow
-corr_ok  = corr_df.set_index("date")["Alt-BTC"] < 0.5
+corr_ok = corr_df.set_index("date").get("Alt-BTC", pd.Series(index=data.index, data=1)) < 0.5
 
 signals = (
     pd.DataFrame({
         "timestamp": data.index,
-        "direction": [
-            "LONG" if trend_ok.loc[ts] and corr_ok.get(ts, False) else ""
-            for ts in data.index
-        ],
+        "direction": ["LONG" if trend_ok.loc[ts] and corr_ok.get(ts, False) else "" for ts in data.index],
     })
     .query("direction != ''")
     .assign(confidence=75)
@@ -100,26 +81,24 @@ signals = (
 )
 
 # -------------------------------------------------------------------------
-# UI
 st.title("📈 Crypto Signal Dashboard (Serverless)")
-
-col1, col2 = st.columns([2, 3])
-
+col1, col2 = st.columns([2,3])
 with col1:
-    st.subheader("30-Bar-Korrelationen")
-    fig = px.line(
-        corr_df,
-        x="date",
-        y=["BTC-SPX", "BTC-Gold", "Alt-BTC"],
-        template="simple_white",
-        labels={"value": "Korrelation", "variable": "Pair", "date": "Datum"},
-        color_discrete_sequence=[ACCENT_1, ACCENT_2, BRAND_MAIN],
-    )
-    fig.update_layout(legend_title="Pair", yaxis=dict(range=[-1, 1]))
-    st.plotly_chart(fig, use_container_width=True)
+    st.subheader("30‑Bar‑Korrelationen")
+    if corr_df.empty:
+        st.info("Nicht genügend Daten für Korrelationen im gewählten Timeframe")
+    else:
+        fig = px.line(corr_df, x="date", y=[c for c in ["BTC-SPX","BTC-Gold","Alt-BTC"] if c in corr_df],
+                      template="simple_white", labels={"value":"Korrelation","variable":"Pair","date":"Datum"},
+                      color_discrete_sequence=[ACCENT_1, ACCENT_2, BRAND_MAIN])
+        fig.update_layout(legend_title="Pair", yaxis=dict(range=[-1,1]))
+        st.plotly_chart(fig, use_container_width=True)
 
 with col2:
     st.subheader(f"Signals {alt_ticker} – {tf}")
-    st.dataframe(signals, use_container_width=True, hide_index=True)
+    if signals.empty:
+        st.info("Keine Signale im aktuellen Zeitraum")
+    else:
+        st.dataframe(signals, use_container_width=True, hide_index=True)
 
-st.caption("Auto-Refresh 5 Min · Daten via Yahoo Finance · © 2025")
+st.caption("Auto‑Refresh 5 Min · Daten: Yahoo Finance · © 2025")
