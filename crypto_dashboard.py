@@ -50,7 +50,7 @@ def load_data(alt: str) -> pd.DataFrame:
     gold = get_price("GC=F",   "GOLD")
     altc = get_price(alt,       "ALT")
     df = pd.concat([btc, spx, gold, altc], axis=1)
-    return df.dropna(how="all")(how="all")
+    return df.dropna(how="all")
 
 data = load_data(alt_ticker)
 
