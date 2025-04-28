@@ -33,22 +33,24 @@ period, interval = TIMEFRAME_MAP[tf]
 # -------------------------------------------------------------------------
 
 def get_price(ticker: str, col_name: str) -> pd.Series:
-    """Download price series and gracefully fall back to 'Close'."""
+    """Lädt eine Preisspalte (Adj Close oder Close) und gibt sie als Series mit
+    korrektem .name zurück. Falls keine Daten, liefert leere Series."""
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     if df.empty:
         return pd.Series(dtype=float, name=col_name)
     price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-    return df[price_col].rename(col_name)
+    ser = df[price_col].copy()
+    ser.name = col_name  # Series.rename(name=...) wäre in pandas>=2 notwendig
+    return ser
 
 @st.cache_data(ttl=280, show_spinner=False)
 def load_data(alt: str) -> pd.DataFrame:
     btc  = get_price("BTC-USD", "BTC")
-    spx  = get_price("^GSPC", "SPX")
-    gold = get_price("GC=F", "GOLD")
-    altc = get_price(alt, "ALT")
+    spx  = get_price("^GSPC",  "SPX")
+    gold = get_price("GC=F",   "GOLD")
+    altc = get_price(alt,       "ALT")
     df = pd.concat([btc, spx, gold, altc], axis=1)
-    # Drop rows where all assets are NaN
-    return df.dropna(how="all")
+    return df.dropna(how="all")(how="all")
 
 data = load_data(alt_ticker)
 
