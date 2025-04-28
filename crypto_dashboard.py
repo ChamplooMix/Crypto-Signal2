@@ -1,109 +1,121 @@
 """crypto_dashboard.py
-Streamlit‑Version des Crypto Signal Dashboards.
-Install:
-  pip install streamlit streamlit-autorefresh plotly requests pandas
-Run:
-  streamlit run crypto_dashboard.py
-Set API endpoint via Streamlit secrets (st.secrets["API_BASE"]).
+Streamlit‑App ohne externes Backend – zieht die Daten direkt aus öffentlichen APIs
+(Yahoo Finance & Coin‑Tickers). Keine eigene Server‑Infrastruktur nötig.
+
+Install & Run (in Streamlit Cloud genügt requirements.txt):
+    pip install -r requirements.txt
+    streamlit run crypto_dashboard.py
 """
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import yfinance as yf
 import pandas as pd
-import requests
+import pandas_ta as ta
 import plotly.express as px
+from datetime import datetime, timedelta
 
-# --- Branding Farben -----------------------------------------------------
-BRAND_MAIN = "#207373"   # Skobeloff
-BRAND_LIGHT = "#99cccc"  # Powder Green
-ACCENT_1 = "#ff9900"     # Tangerine
-ACCENT_2 = "#990066"     # Flirt
-BG_LIGHT = "#cae3e3"     # Powder Green Light
+# -------------------------------------------------------------------------
+# Branding ‑ Corporate Colours (Skobeloff usw.)
+BRAND_MAIN = "#207373"
+BRAND_LIGHT = "#99cccc"
+ACCENT_1 = "#ff9900"
+ACCENT_2 = "#990066"
+BG_LIGHT  = "#cae3e3"
 
-# --- Page Config ---------------------------------------------------------
-st.set_page_config(
-    page_title="Crypto Signal Dashboard",
-    page_icon="📊",
-    layout="wide",
-)
+st.set_page_config(page_title="Crypto Signal Dashboard", page_icon="📊", layout="wide")
 
 st.markdown(
     f"""
     <style>
-        .stApp {{
-            background-color: {BG_LIGHT};
-            font-family: 'Inter', sans-serif;
-        }}
-        .css-1n76uvr p {{
-            color: {BRAND_MAIN};
-        }}
-    </style>
-    """,
+        .stApp {{ background-color:{BG_LIGHT}; font-family: 'Inter',sans-serif; }}
+        h1,h2,h3,h4 {{ color:{BRAND_MAIN}; }}
+    </style>""",
     unsafe_allow_html=True,
 )
 
-# --- Helper --------------------------------------------------------------
-API_BASE = st.secrets.get("API_BASE", "https://api.example.com")
+# -------------------------------------------------------------------------
+# Helper – Mapping Streamlit timeframe → yfinance period/interval
+TF_MAP = {
+    "5m":  ("7d",  "5m"),   # max 7 Tage
+    "15m": ("30d", "15m"),  # max 30 Tage
+    "1h":  ("60d", "60m"),  # ca. 2 Monate
+    "4h":  ("60d", "240m"), # 4‑Stunden‑Kerzen
+    "1d":  ("365d","1d"),   # 1 Jahr Daily
+}
 
-def fetch_json(endpoint: str):
-    """ GET JSON helper with basic error handling """
-    r = requests.get(endpoint, timeout=8)
-    r.raise_for_status()
-    return r.json()
-
-# --- Sidebar -------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Sidebar – User‑Inputs
 st.sidebar.title("⚙️ Einstellungen")
-timeframes = ["5m", "15m", "1h", "4h", "1d"]
-selected_tf = st.sidebar.selectbox("Timeframe", timeframes, index=3)
+timeframe = st.sidebar.selectbox("Timeframe", list(TF_MAP.keys()), index=3)
+alt_ticker = st.sidebar.text_input("Altcoin‑Ticker (Yahoo‑Symbol)", value="ETH-USD")
 
-# Auto‑Refresh alle 5 Minuten (300 000 ms)
+# Auto‑Refresh alle 5 Min
 st_autorefresh(interval=300_000, key="datarefresh")
 
-# --- Load Data -----------------------------------------------------------
-@st.cache_data(ttl=280)
-def load_data(tf: str):
-    try:
-        corr = fetch_json(f"{API_BASE}/correlation?tf={tf}")
-        sig = fetch_json(f"{API_BASE}/signals?tf={tf}")
-        return pd.DataFrame(corr), pd.DataFrame(sig), None
-    except Exception as exc:
-        demo_corr = [
-            {"date": "2025-04-01", "btc_sp500": 0.62, "btc_gold": 0.08, "alt_btc": 0.47},
-            {"date": "2025-04-08", "btc_sp500": 0.67, "btc_gold": 0.05, "alt_btc": 0.44},
-            {"date": "2025-04-15", "btc_sp500": 0.66, "btc_gold": 0.09, "alt_btc": 0.42},
-            {"date": "2025-04-22", "btc_sp500": 0.69, "btc_gold": 0.07, "alt_btc": 0.39},
-        ]
-        demo_sig = [
-            {"timestamp": "2025-04-27 09:15", "symbol": "SOLUSDT", "direction": "LONG", "confidence": 78},
-            {"timestamp": "2025-04-27 11:30", "symbol": "RNDRUSDT", "direction": "SHORT", "confidence": 65},
-        ]
-        return pd.DataFrame(demo_corr), pd.DataFrame(demo_sig), str(exc)
+period, interval = TF_MAP[timeframe]
 
-corr_df, sig_df, err_msg = load_data(selected_tf)
+@st.cache_data(ttl=280, show_spinner=False)
+def load_market_data(alt: str, period: str, interval: str):
+    btc = yf.download("BTC-USD", period=period, interval=interval, progress=False)["Adj Close"].rename("BTC")
+    spx = yf.download("^GSPC",  period=period, interval=interval, progress=False)["Adj Close"].rename("SP500")
+    gold = yf.download("GC=F",   period=period, interval=interval, progress=False)["Adj Close"].rename("GOLD")
+    altc = yf.download(alt,       period=period, interval=interval, progress=False)["Adj Close"].rename("ALT")
+    df = pd.concat([btc, spx, gold, altc], axis=1).dropna()
+    return df
 
-# --- UI ------------------------------------------------------------------
-if err_msg:
-    st.warning("Fehler beim Laden der Live‑Daten – Demo‑Werte werden angezeigt.\n" + err_msg)
+data = load_market_data(alt_ticker, period, interval)
 
-st.title("📈 Crypto Signal Dashboard (Streamlit)")
+# -------------------------------------------------------------------------
+# Correlations – rolling window 30 Kerzen
+window = 30
+corr_btc_spx  = data["BTC"].rolling(window).corr(data["SP500"])
+corr_btc_gold = data["BTC"].rolling(window).corr(data["GOLD"])
+corr_alt_btc  = data["ALT"].rolling(window).corr(data["BTC"])
 
-# 1) Correlation Chart -----------------------------------------------------
-col1, col2 = st.columns([2, 3])
+corr_df = pd.DataFrame({
+    "date": data.index,
+    "BTC‑SPX":  corr_btc_spx,
+    "BTC‑Gold": corr_btc_gold,
+    "Alt‑BTC":  corr_alt_btc,
+}).dropna()
+
+# -------------------------------------------------------------------------
+# Simple Signal – EMA‑Crossover + Korrelationsfilter
+SIG_CONF = 75
+ema_fast = ta.ema(data["ALT"], length=8)
+ema_slow = ta.ema(data["ALT"], length=21)
+trend_ok  = ema_fast > ema_slow
+corr_ok   = corr_alt_btc < 0.5
+
+signals = pd.DataFrame({
+    "timestamp": data.index,
+    "price": data["ALT"],
+    "direction": ["LONG" if trend and corr else "" for trend, corr in zip(trend_ok, corr_ok)],
+}).query("direction != ''")
+
+# Nur letzte 20 Signale, Konf. simuliert
+signals = signals.tail(20).assign(confidence=SIG_CONF)
+
+# -------------------------------------------------------------------------
+# UI
+st.title("📈 Crypto Signal Dashboard (Streamlit – No Server Needed)")
+
+col1, col2 = st.columns([2,3])
 with col1:
-    st.subheader("BTC ↔ Märkte – 30‑Tage‑Korrelation")
+    st.subheader("BTC vs. Märkte – 30‑Bar‑Korrelation")
     fig = px.line(
         corr_df,
         x="date",
-        y=["btc_sp500", "btc_gold", "alt_btc"],
-        labels={"value": "Korrelation", "variable": "Pair", "date": "Datum"},
+        y=["BTC‑SPX", "BTC‑Gold", "Alt‑BTC"],
         template="simple_white",
+        labels={"value":"Korrelation", "variable":"Pair", "date":"Datum"},
         color_discrete_sequence=[ACCENT_1, ACCENT_2, BRAND_MAIN],
     )
-    fig.update_layout(legend_title="Pair", yaxis=dict(range=[-1, 1]))
+    fig.update_layout(legend_title="Pair", yaxis=dict(range=[-1,1]))
     st.plotly_chart(fig, use_container_width=True)
 
-# 2) Signal Table ---------------------------------------------------------
 with col2:
-    st.subheader(f"Live‑Trading‑Signale ({selected_tf.upper()})")
-    st.dataframe(sig_df, use_container_width=True, hide_index=True)
+    st.subheader(f"Trading‑Signale für {alt_ticker} ({timeframe}) – EMA‑Cross & ρ<0,5")
+    st.dataframe(signals[["timestamp","direction","confidence"]], use_container_width=True, hide_index=True)
 
-st.caption("Auto‑Refresh alle 5 Minuten · © 2025 Crypto Signal Dashboard")
+st.caption("Auto‑Refresh alle 5 Min · Daten via Yahoo Finance · © 2025 Crypto Dashboard")
